@@ -16,6 +16,7 @@ package clickhouselogsexporter
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,14 @@ const (
 	CLUSTER                = "cluster"
 	DISTRIBUTED_LOGS_TABLE = "distributed_logs"
 )
+
+func toHexTraceID(t pcommon.TraceID) string {
+	return hex.EncodeToString(t[:])
+}
+
+func toHexSpanID(s pcommon.SpanID) string {
+	return hex.EncodeToString(s[:])
+}
 
 type clickhouseLogsExporter struct {
 	db            clickhouse.Conn
@@ -169,8 +178,9 @@ func (e *clickhouseLogsExporter) pushLogsData(ctx context.Context, ld plog.Logs)
 						ts,
 						ots,
 						e.ksuid.String(),
-						r.TraceID().HexString(),
-						r.SpanID().HexString(),
+						// FIXME: hex encode trace id
+						toHexTraceID(r.TraceID()),
+						toHexSpanID(r.SpanID()),
 						uint32(r.Flags()),
 						r.SeverityText(),
 						uint8(r.SeverityNumber()),

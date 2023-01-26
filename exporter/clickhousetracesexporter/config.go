@@ -16,13 +16,10 @@ package clickhousetracesexporter
 
 import (
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 )
 
 // Config defines configuration for logging exporter.
 type Config struct {
-	config.ExporterSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-
 	Options    `mapstructure:",squash"`
 	Datasource string `mapstructure:"datasource"`
 	Migrations string `mapstructure:"migrations"`
@@ -30,7 +27,7 @@ type Config struct {
 	DockerMultiNodeCluster bool `mapstructure:"docker_multi_node_cluster" default:"false"`
 }
 
-var _ component.ExporterConfig = (*Config)(nil)
+var _ component.Config = (*Config)(nil)
 
 // Validate checks if the exporter configuration is valid
 func (cfg *Config) Validate() error {

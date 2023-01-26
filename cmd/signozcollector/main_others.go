@@ -1,9 +1,9 @@
 package main
 
 import (
-	"go.opentelemetry.io/collector/service"
+	"go.opentelemetry.io/collector/otelcol"
 )
 
-func run(params service.CollectorSettings) error {
+func run(params otelcol.CollectorSettings) error {
 	return runInteractive(params)
 }
