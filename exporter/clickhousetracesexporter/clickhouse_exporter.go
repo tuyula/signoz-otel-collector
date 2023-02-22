@@ -71,7 +71,7 @@ func newExporter(cfg component.Config, logger *zap.Logger) (*storage, error) {
 		return nil, err
 	}
 
-	storage := storage{Writer: spanWriter, usageCollector: collector}
+	storage := storage{Writer: spanWriter, usageCollector: collector, config: storageConfig{lowCardinalExceptionGrouping: configClickHouse.LowCardinalExceptionGrouping}}
 
 	return &storage, nil
 }
@@ -79,6 +79,11 @@ func newExporter(cfg component.Config, logger *zap.Logger) (*storage, error) {
 type storage struct {
 	Writer         Writer
 	usageCollector *usage.UsageCollector
+	config         storageConfig
+}
+
+type storageConfig struct {
+	lowCardinalExceptionGrouping bool
 }
 
 func toHexTraceID(t pcommon.TraceID) string {
@@ -221,7 +226,7 @@ func populateOtherDimensions(attributes pcommon.Map, span *Span) {
 
 }
 
-func populateEvents(events ptrace.SpanEventSlice, span *Span) {
+func populateEvents(events ptrace.SpanEventSlice, span *Span, lowCardinalExceptionGrouping bool) {
 	for i := 0; i < events.Len(); i++ {
 		event := Event{}
 		event.Name = events.At(i).Name()
@@ -238,8 +243,14 @@ func populateEvents(events ptrace.SpanEventSlice, span *Span) {
 			uuidWithHyphen := uuid.New()
 			uuid := strings.Replace(uuidWithHyphen.String(), "-", "", -1)
 			span.ErrorID = uuid
-			hmd5 := md5.Sum([]byte(span.ServiceName + span.ErrorEvent.AttributeMap["exception.type"] + span.ErrorEvent.AttributeMap["exception.message"]))
-			span.ErrorGroupID = fmt.Sprintf("%x", hmd5)
+			var hash [16]byte
+			if lowCardinalExceptionGrouping {
+				hash = md5.Sum([]byte(span.ServiceName + span.ErrorEvent.AttributeMap["exception.type"]))
+			} else {
+				hash = md5.Sum([]byte(span.ServiceName + span.ErrorEvent.AttributeMap["exception.type"] + span.ErrorEvent.AttributeMap["exception.message"]))
+
+			}
+			span.ErrorGroupID = fmt.Sprintf("%x", hash)
 		}
 		stringEvent, _ := json.Marshal(event)
 		span.Events = append(span.Events, string(stringEvent))
@@ -251,7 +262,7 @@ func populateTraceModel(span *Span) {
 	span.TraceModel.HasError = span.HasError
 }
 
-func newStructuredSpan(otelSpan ptrace.Span, ServiceName string, resource pcommon.Resource) *Span {
+func newStructuredSpan(otelSpan ptrace.Span, ServiceName string, resource pcommon.Resource, config storageConfig) *Span {
 	durationNano := uint64(otelSpan.EndTimestamp() - otelSpan.StartTimestamp())
 
 	attributes := otelSpan.Attributes()
@@ -332,7 +343,7 @@ func newStructuredSpan(otelSpan ptrace.Span, ServiceName string, resource pcommo
 		span.HasError = true
 	}
 	populateOtherDimensions(attributes, span)
-	populateEvents(otelSpan.Events(), span)
+	populateEvents(otelSpan.Events(), span, config.lowCardinalExceptionGrouping)
 	populateTraceModel(span)
 
 	return span
@@ -358,7 +369,7 @@ func (s *storage) pushTraceData(ctx context.Context, td ptrace.Traces) error {
 			for k := 0; k < spans.Len(); k++ {
 				span := spans.At(k)
 				// traceID := hex.EncodeToString(span.TraceID())
-				structuredSpan := newStructuredSpan(span, serviceName, rs.Resource())
+				structuredSpan := newStructuredSpan(span, serviceName, rs.Resource(), s.config)
 				err := s.Writer.WriteSpan(structuredSpan)
 				if err != nil {
 					zap.S().Error("Error in writing spans to clickhouse: ", err)
