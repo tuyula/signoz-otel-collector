@@ -49,6 +49,8 @@ const (
 	TIME_SERIES_TABLE             = "time_series_v2"
 	SAMPLES_TABLE                 = "samples_v2"
 	temporalityLabel              = "__temporality__"
+	EXEMPLARS_TABLE               = "exemplars"
+	DISTRIBUTED_EXEMPLARS_TABLE   = "distributed_exemplars"
 )
 
 // clickHouse implements storage interface for the ClickHouse.
@@ -143,6 +145,22 @@ func NewClickHouse(params *ClickHouseParams) (base.Storage, error) {
 
 	queries = append(queries, fmt.Sprintf(`
 		ALTER TABLE %s.%s ON CLUSTER %s ADD COLUMN IF NOT EXISTS temporality String DEFAULT 'Cumulative'`, database, DISTRIBUTED_TIME_SERIES_TABLE, CLUSTER))
+
+	// Create table for storing the exemplars
+	queries = append(queries, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.%s ON CLUSTER %s (
+			labels String Codec(ZSTD(5)),
+			fingerprint UInt64 Codec(DoubleDelta, LZ4),
+			timestamp_ms Int64 Codec(DoubleDelta, LZ4),
+			value Float64 Codec(Gorilla, LZ4)
+		)
+		ENGINE = MergeTree
+			PARTITION BY toDate(timestamp_ms / 1000)
+			ORDER BY (fingerprint, timestamp_ms)
+			TTL toDateTime(timestamp_ms/1000) + INTERVAL 2592000 SECOND DELETE;`, database, EXEMPLARS_TABLE, CLUSTER))
+
+	queries = append(queries, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.%s ON CLUSTER %s AS %s.%s ENGINE = Distributed("%s", %s, %s, cityHash64(fingerprint));`, database, DISTRIBUTED_EXEMPLARS_TABLE, CLUSTER, database, EXEMPLARS_TABLE, CLUSTER, database, EXEMPLARS_TABLE))
 
 	options := &clickhouse.Options{
 		Addr: []string{dsnURL.Host},
@@ -405,6 +423,53 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest, metr
 		stats.Record(ctx, writeLatencyMillis.M(int64(time.Since(start).Milliseconds())))
 		return err
 	}()
+	if err != nil {
+		return err
+	}
+
+	// write exemplars
+	err = func() error {
+		ctx := context.Background()
+
+		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.%s", ch.database, DISTRIBUTED_EXEMPLARS_TABLE))
+		if err != nil {
+			return err
+		}
+
+		for _, ts := range data.Timeseries {
+			for _, e := range ts.Exemplars {
+				labels := make([]*prompb.Label, 0, len(e.Labels)+1)
+				for _, l := range e.Labels {
+					labels = append(labels, &prompb.Label{
+						Name:  l.Name,
+						Value: l.Value,
+					})
+				}
+				timeseries.SortLabels(labels)
+				fingerprint := timeseries.Fingerprint(labels)
+
+				encodedLabels := string(marshalLabels(labels, make([]byte, 0, 128)))
+				err = statement.Append(
+					encodedLabels,
+					fingerprint,
+					e.Timestamp,
+					e.Value,
+				)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		start := time.Now()
+		err = statement.Send()
+		ctx, _ = tag.New(ctx,
+			tag.Upsert(exporterKey, string(component.DataTypeMetrics)),
+			tag.Upsert(tableKey, DISTRIBUTED_EXEMPLARS_TABLE),
+		)
+		stats.Record(ctx, writeLatencyMillis.M(int64(time.Since(start).Milliseconds())))
+		return err
+	}()
+
 	if err != nil {
 		return err
 	}
